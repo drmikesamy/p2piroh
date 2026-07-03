@@ -8,15 +8,27 @@ Minimal Rust + iroh + WebAssembly collaborative text field.
 
 ## 1) One-time setup
 
+Desktop / laptop setup:
+
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install wasm-pack
 ```
 
+If you are on Android Termux and `rustup` is missing, use this instead:
+
+```bash
+pkg update -y
+pkg install -y rust
+```
+
+Termux note: if `wasm-pack` is also missing, that is fine. Do the wasm build on your PC (step 2), then copy the generated `static/pkg` folder to your phone project. Running the app on phone only needs `cargo`, not `rustup` or `wasm-pack`.
+
 ## 2) Build wasm frontend
 
 ```bash
-wasm-pack build wasm --target web --release --out-dir static/pkg --out-name app
+wasm-pack build wasm --target web --release --out-dir ../static/pkg --out-name app
+rm -f static/pkg/.gitignore
 ```
 
 ## 3) Run side A (host)

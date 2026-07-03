@@ -2,8 +2,7 @@
 /target/
 **/target/
 
-# wasm-pack output
-/static/pkg/
+# wasm-pack output (tracked on purpose for phone/Termux workflow)
 
 # Node/package leftovers (if used later)
 node_modules/
