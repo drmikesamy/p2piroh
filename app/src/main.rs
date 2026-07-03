@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
         .alpns(vec![ALPN.to_vec()])
         .bind()
         .await?;
+    #[cfg(not(target_os = "android"))]
     endpoint.online().await;
 
     let ticket = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&Ticket(endpoint.addr()))?);
