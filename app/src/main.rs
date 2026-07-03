@@ -1,7 +1,14 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::{
+    Json,
     extract::{ws::{Message, WebSocket, WebSocketUpgrade}, State},
     response::IntoResponse,
     routing::get,
@@ -31,10 +38,17 @@ struct AppState {
     text: Arc<RwLock<String>>,
     ws_tx: broadcast::Sender<String>,
     p2p_tx: broadcast::Sender<String>,
+    p2p_connections: Arc<AtomicUsize>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Ticket(EndpointAddr);
+
+#[derive(Serialize)]
+struct DebugInfo {
+    text_len: usize,
+    p2p_connections: usize,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -55,6 +69,7 @@ async fn main() -> Result<()> {
         text: Arc::new(RwLock::new(String::new())),
         ws_tx,
         p2p_tx,
+        p2p_connections: Arc::new(AtomicUsize::new(0)),
     };
 
     let p2p_state = state.clone();
@@ -62,22 +77,20 @@ async fn main() -> Result<()> {
         Some(t) => {
             let addr = parse_ticket(&t)?;
             tokio::spawn(async move {
-                if let Err(e) = run_p2p_client(endpoint, addr, p2p_state).await {
-                    eprintln!("p2p client error: {e:#}");
-                }
+                run_p2p_client_loop(endpoint, addr, p2p_state).await;
             });
         }
         None => {
             tokio::spawn(async move {
-                if let Err(e) = run_p2p_host(endpoint, p2p_state).await {
-                    eprintln!("p2p host error: {e:#}");
-                }
+                run_p2p_host_loop(endpoint, p2p_state).await;
             });
         }
     }
 
     let app = Router::new()
         .route("/ws", get(ws))
+        .route("/health", get(health))
+        .route("/debug", get(debug))
         .with_state(state)
         .fallback_service(ServeDir::new("static").append_index_html_on_directories(true));
 
@@ -92,22 +105,50 @@ fn parse_ticket(t: &str) -> Result<EndpointAddr> {
     Ok(serde_json::from_slice::<Ticket>(&raw)?.0)
 }
 
-async fn run_p2p_host(endpoint: Endpoint, state: AppState) -> Result<()> {
-    let conn = endpoint
-        .accept()
-        .await
-        .context("waiting for incoming iroh connection")?
-        .await
-        .context("accepting iroh connection")?;
-    run_conn(conn, state).await
+async fn run_p2p_host_loop(endpoint: Endpoint, state: AppState) {
+    loop {
+        let Some(incoming) = endpoint.accept().await else {
+            eprintln!("p2p host: endpoint closed");
+            return;
+        };
+        match incoming.await {
+            Ok(conn) => {
+                eprintln!("p2p host: peer connected");
+                let state_clone = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = run_conn(conn, state_clone).await {
+                        eprintln!("p2p host connection error: {e:#}");
+                    }
+                });
+            }
+            Err(e) => {
+                eprintln!("p2p host accept error: {e:#}");
+            }
+        }
+    }
 }
 
-async fn run_p2p_client(endpoint: Endpoint, addr: EndpointAddr, state: AppState) -> Result<()> {
-    let conn = endpoint.connect(addr, ALPN).await?;
-    run_conn(conn, state).await
+async fn run_p2p_client_loop(endpoint: Endpoint, addr: EndpointAddr, state: AppState) {
+    loop {
+        match endpoint.connect(addr.clone(), ALPN).await {
+            Ok(conn) => {
+                eprintln!("p2p client: connected");
+                if let Err(e) = run_conn(conn, state.clone()).await {
+                    eprintln!("p2p client connection error: {e:#}");
+                }
+                eprintln!("p2p client: reconnecting in 2s");
+            }
+            Err(e) => {
+                eprintln!("p2p client connect error: {e:#}");
+                eprintln!("p2p client: retrying in 2s");
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }
 
 async fn run_conn(conn: iroh::endpoint::Connection, state: AppState) -> Result<()> {
+    state.p2p_connections.fetch_add(1, Ordering::Relaxed);
     let mut out = state.p2p_tx.subscribe();
     let conn_send = conn.clone();
 
@@ -120,17 +161,30 @@ async fn run_conn(conn: iroh::endpoint::Connection, state: AppState) -> Result<(
         }
     });
 
+    let recv_state = state.clone();
     let recv_task = tokio::spawn(async move {
         loop {
             let Ok(mut s) = conn.accept_uni().await else { break };
             let Ok(bytes) = s.read_to_end(MAX_MSG).await else { continue };
             let Ok(text) = String::from_utf8(bytes) else { continue };
-            apply_remote(&state, text).await;
+            apply_remote(&recv_state, text).await;
         }
     });
 
     let _ = tokio::join!(send_task, recv_task);
+    state.p2p_connections.fetch_sub(1, Ordering::Relaxed);
     Ok(())
+}
+
+async fn health() -> &'static str {
+    "ok"
+}
+
+async fn debug(State(state): State<AppState>) -> Json<DebugInfo> {
+    Json(DebugInfo {
+        text_len: state.text.read().await.len(),
+        p2p_connections: state.p2p_connections.load(Ordering::Relaxed),
+    })
 }
 
 async fn ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
