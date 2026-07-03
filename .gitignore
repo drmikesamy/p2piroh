@@ -1,0 +1,15 @@
+# Rust
+/target/
+**/target/
+
+# wasm-pack output
+/static/pkg/
+
+# Node/package leftovers (if used later)
+node_modules/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
