@@ -54,10 +54,12 @@ struct DebugInfo {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let endpoint = Endpoint::builder(presets::N0)
-        .alpns(vec![ALPN.to_vec()])
-        .bind()
-        .await?;
+    let builder = Endpoint::builder(presets::N0).alpns(vec![ALPN.to_vec()]);
+    #[cfg(target_os = "android")]
+    let builder = builder.dns_resolver(iroh::dns::DnsResolver::with_nameserver(
+        "8.8.8.8:53".parse::<SocketAddr>()?,
+    ));
+    let endpoint = builder.bind().await?;
     #[cfg(not(target_os = "android"))]
     endpoint.online().await;
 
